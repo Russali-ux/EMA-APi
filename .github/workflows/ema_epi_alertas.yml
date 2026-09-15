@@ -1,0 +1,48 @@
+name: EMA/AEMPS ePI Monitor
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Diario 07:00 UTC = 02:00 Lima. El piloto es pequeño (23 PI Lists
+    # totales confirmadas en Fase 0), así que una corrida diaria es
+    # liviana y no hay señales de bloqueo de IP como sí ocurrió con FDA.
+    - cron: "0 7 * * *"
+
+jobs:
+  scrape-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar scraper EMA/AEMPS ePI
+        env:
+          EMA_EPI_BASE_URL: ${{ secrets.EMA_EPI_BASE_URL }}
+          EMA_EPI_SUBSCRIPTION_KEY: ${{ secrets.EMA_EPI_SUBSCRIPTION_KEY }}
+        run: python scripts/scraper_ema_epi.py
+
+      - name: Sincronizar con Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python scripts/ema_epi_sync_supabase.py
+
+      - name: Commit snapshot JSON (respaldo)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/ema_epi_data.json
+          git diff --staged --quiet || git commit -m "chore: actualizar snapshot ePI EMA/AEMPS [skip ci]"
+          git push
+        continue-on-error: true
+        # Nota: si falla con 403 "denied to github-actions[bot]", activar
+        # Settings → Actions → General → Workflow permissions →
+        # "Read and write permissions" (mismo gotcha que en el módulo India).

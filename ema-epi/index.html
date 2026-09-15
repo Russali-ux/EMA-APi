@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EMA/AEMPS ePI — Alertas-analyzer</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root{
+    --brand:#0F1F7A;
+    --brand-2:#198754;
+    --bg:#f5f6fa;
+    --card:#ffffff;
+    --text:#1a1a1a;
+    --muted:#6b7280;
+    --border:#e5e7eb;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:'Inter',system-ui,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+  }
+  header{
+    background:var(--brand);
+    color:#fff;
+    padding:20px 24px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:12px;
+  }
+  header h1{margin:0;font-size:1.25rem;}
+  header a.back{
+    color:#fff;
+    text-decoration:none;
+    font-size:0.85rem;
+    border:1px solid rgba(255,255,255,0.4);
+    padding:6px 12px;
+    border-radius:6px;
+  }
+  .toggle{
+    display:flex;
+    gap:8px;
+    padding:16px 24px 0;
+  }
+  .toggle button{
+    padding:8px 16px;
+    border-radius:8px;
+    border:1px solid var(--border);
+    background:var(--card);
+    cursor:pointer;
+    font-weight:600;
+  }
+  .toggle button.active{
+    background:var(--brand);
+    color:#fff;
+    border-color:var(--brand);
+  }
+  .kpis{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+    gap:16px;
+    padding:16px 24px;
+  }
+  .kpi{
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:16px;
+  }
+  .kpi .value{font-size:1.8rem;font-weight:700;color:var(--brand);}
+  .kpi .label{color:var(--muted);font-size:0.85rem;}
+  .filters{
+    display:flex;
+    gap:12px;
+    padding:0 24px 16px;
+    flex-wrap:wrap;
+  }
+  .filters input, .filters select{
+    padding:8px 12px;
+    border:1px solid var(--border);
+    border-radius:8px;
+    font-size:0.9rem;
+  }
+  table{
+    width:calc(100% - 48px);
+    margin:0 24px 24px;
+    border-collapse:collapse;
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:10px;
+    overflow:hidden;
+  }
+  th,td{
+    padding:10px 14px;
+    text-align:left;
+    border-bottom:1px solid var(--border);
+    font-size:0.9rem;
+  }
+  th{
+    background:#fafafa;
+    color:var(--muted);
+    text-transform:uppercase;
+    font-size:0.75rem;
+    letter-spacing:0.03em;
+  }
+  tr:hover{background:#fafafa;}
+  .badge{
+    display:inline-block;
+    padding:2px 8px;
+    border-radius:999px;
+    font-size:0.75rem;
+    font-weight:600;
+  }
+  .badge.nuevo{background:#dbeafe;color:#1e40af;}
+  .badge.modificado{background:#fef3c7;color:#92400e;}
+  #loading, #empty{padding:24px;color:var(--muted);}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🇪🇺 EMA / AEMPS · ePI (Ficha Técnica / Prospecto)</h1>
+  <a class="back" href="../index.html">← Volver al inicio</a>
+</header>
+
+<div class="toggle">
+  <button id="btn-ema" class="active">EMA (central)</button>
+  <button id="btn-aemps">AEMPS (España)</button>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="value" id="kpi-total">–</div><div class="label">Documentos monitoreados</div></div>
+  <div class="kpi"><div class="value" id="kpi-cambios-30d">–</div><div class="label">Cambios detectados (30 días)</div></div>
+  <div class="kpi"><div class="value" id="kpi-spc">–</div><div class="label">Fichas Técnicas (SPC)</div></div>
+  <div class="kpi"><div class="value" id="kpi-pl">–</div><div class="label">Prospectos</div></div>
+</div>
+
+<div class="filters">
+  <input type="text" id="filtro-medicamento" placeholder="Buscar medicamento...">
+  <select id="filtro-tipo">
+    <option value="">Todos los tipos</option>
+    <option value="Ficha Técnica (SPC)">Ficha Técnica (SPC)</option>
+    <option value="Anexo II">Anexo II</option>
+    <option value="Rotulado">Rotulado</option>
+    <option value="Prospecto">Prospecto</option>
+  </select>
+</div>
+
+<div id="loading">Cargando cambios recientes…</div>
+<div id="empty" style="display:none;">No hay cambios registrados todavía para esta agencia.</div>
+
+<table id="tabla-cambios" style="display:none;">
+  <thead>
+    <tr>
+      <th>Medicamento</th>
+      <th>Tipo de documento</th>
+      <th>Idioma</th>
+      <th>Tipo de cambio</th>
+      <th>Fecha detección</th>
+    </tr>
+  </thead>
+  <tbody id="tabla-body"></tbody>
+</table>
+
+<script>
+  // TODO: reemplazar con las credenciales reales del proyecto Supabase
+  // (mismo patrón que cima/pavs/aems/india: anon key pública, lectura RLS-only)
+  const SUPABASE_URL = 'https://ggbnfdaxtsngsjssrwrl.supabase.co';
+  const SUPABASE_ANON_KEY = 'REEMPLAZAR_CON_ANON_KEY';
+
+  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  let agenciaActual = 'EMA';
+
+  async function cargarDatos() {
+    document.getElementById('loading').style.display = 'block';
+    document.getElementById('tabla-cambios').style.display = 'none';
+    document.getElementById('empty').style.display = 'none';
+
+    const { data: cambios, error } = await supabase
+      .from('ema_epi_cambios')
+      .select('*')
+      .eq('agencia', agenciaActual)
+      .order('fecha_deteccion', { ascending: false })
+      .limit(200);
+
+    const { count: totalDocs } = await supabase
+      .from('ema_epi_documentos')
+      .select('*', { count: 'exact', head: true })
+      .eq('agencia', agenciaActual);
+
+    const { count: totalSpc } = await supabase
+      .from('ema_epi_documentos')
+      .select('*', { count: 'exact', head: true })
+      .eq('agencia', agenciaActual)
+      .eq('tipo_documento', 'Ficha Técnica (SPC)');
+
+    const { count: totalPl } = await supabase
+      .from('ema_epi_documentos')
+      .select('*', { count: 'exact', head: true })
+      .eq('agencia', agenciaActual)
+      .eq('tipo_documento', 'Prospecto');
+
+    document.getElementById('kpi-total').textContent = totalDocs ?? 0;
+    document.getElementById('kpi-spc').textContent = totalSpc ?? 0;
+    document.getElementById('kpi-pl').textContent = totalPl ?? 0;
+
+    if (error) {
+      console.error(error);
+      document.getElementById('loading').textContent = 'Error cargando datos: ' + error.message;
+      return;
+    }
+
+    const hace30dias = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const cambiosRecientes = (cambios || []).filter(c => new Date(c.fecha_deteccion) >= hace30dias);
+    document.getElementById('kpi-cambios-30d').textContent = cambiosRecientes.length;
+
+    renderTabla(cambios || []);
+    document.getElementById('loading').style.display = 'none';
+  }
+
+  function renderTabla(cambios) {
+    const filtroTexto = document.getElementById('filtro-medicamento').value.toLowerCase();
+    const filtroTipo = document.getElementById('filtro-tipo').value;
+
+    const filtrados = cambios.filter(c => {
+      const matchTexto = !filtroTexto || (c.nombre_medicamento || '').toLowerCase().includes(filtroTexto);
+      const matchTipo = !filtroTipo || c.tipo_documento === filtroTipo;
+      return matchTexto && matchTipo;
+    });
+
+    const tbody = document.getElementById('tabla-body');
+    tbody.innerHTML = '';
+
+    if (filtrados.length === 0) {
+      document.getElementById('empty').style.display = 'block';
+      document.getElementById('tabla-cambios').style.display = 'none';
+      return;
+    }
+
+    document.getElementById('empty').style.display = 'none';
+    document.getElementById('tabla-cambios').style.display = 'table';
+
+    for (const c of filtrados) {
+      const tr = document.createElement('tr');
+      const badgeClass = c.tipo_cambio === 'nuevo_documento' ? 'nuevo' : 'modificado';
+      const badgeLabel = c.tipo_cambio === 'nuevo_documento' ? 'Nuevo' : 'Modificado';
+      tr.innerHTML = `
+        <td>${c.nombre_medicamento || '—'}</td>
+        <td>${c.tipo_documento || '—'}</td>
+        <td>${c.idioma || '—'}</td>
+        <td><span class="badge ${badgeClass}">${badgeLabel}</span></td>
+        <td>${new Date(c.fecha_deteccion).toLocaleString('es-PE')}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  document.getElementById('btn-ema').addEventListener('click', () => {
+    agenciaActual = 'EMA';
+    document.getElementById('btn-ema').classList.add('active');
+    document.getElementById('btn-aemps').classList.remove('active');
+    cargarDatos();
+  });
+
+  document.getElementById('btn-aemps').addEventListener('click', () => {
+    agenciaActual = 'AEMPS';
+    document.getElementById('btn-aemps').classList.add('active');
+    document.getElementById('btn-ema').classList.remove('active');
+    cargarDatos();
+  });
+
+  document.getElementById('filtro-medicamento').addEventListener('input', cargarDatos);
+  document.getElementById('filtro-tipo').addEventListener('change', cargarDatos);
+
+  cargarDatos();
+</script>
+
+</body>
+</html>
