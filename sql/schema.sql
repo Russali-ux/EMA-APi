@@ -52,10 +52,12 @@ create index if not exists idx_ema_epi_cambios_agencia
 alter table public.ema_epi_documentos enable row level security;
 alter table public.ema_epi_cambios enable row level security;
 
+drop policy if exists "lectura publica ema_epi_documentos" on public.ema_epi_documentos;
 create policy "lectura publica ema_epi_documentos"
     on public.ema_epi_documentos for select
     using (true);
 
+drop policy if exists "lectura publica ema_epi_cambios" on public.ema_epi_cambios;
 create policy "lectura publica ema_epi_cambios"
     on public.ema_epi_cambios for select
     using (true);
@@ -65,4 +67,4 @@ create policy "lectura publica ema_epi_cambios"
 
 -- Flag de acceso en la tabla compartida 'perfiles' (patrón india/cima/pavs)
 alter table public.perfiles
-    add column if not exists acceso_ema_epi boolean not null default true;
+    add column if not exists acceso_ema_epi boolean not null default false;
