@@ -125,3 +125,54 @@ Ejecutar `sql/schema.sql` en el SQL editor de Supabase antes del primer run.
 | `EMA_EPI_SUBSCRIPTION_KEY` | Opcional — solo si Azure APIM lo exige |
 | `SUPABASE_URL` | `https://ggbnfdaxtsngsjssrwrl.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service role key (solo en GitHub Secrets, nunca en el repo) |
+
+## 🛡️ Resiliencia ante caídas de la EMA (22/10/2026)
+
+El run #48 falló porque **la API de la EMA devolvía HTTP 500 en todas las
+rutas** (`/List`, `/List/{id}`, `/Bundle/{id}`) con
+`"The format of value ' ' is invalid."`, lanzado desde
+`RetrievalBusiness.GetConsumerLists → HttpClientHelper.SendAsync`. Es un
+fallo interno de la EMA al llamar a su propio backend; no del scraper.
+
+Desde ahora:
+
+- `ema_epi_client` reintenta 5xx/timeouts y, si persisten, lanza
+  `EmaEpiFuenteCaida`. Los 4xx no se reintentan y sí fallan el job (son errores nuestros).
+- El scraper captura la caída, **no sobrescribe** `data/ema_epi_data.json`,
+  escribe `data/ema_epi_estado.json` (`ok` | `parcial` | `fuente_caida`),
+  emite un `::warning::` y sale con código 0.
+- El sync **siempre** registra la corrida en `ema_epi_corridas` (con el error
+  de la EMA y el link al run), y solo actualiza documentos/cambios si hubo datos.
+- `ema_epi_cambios.resumen_cambio` ahora lista las secciones modificadas /
+  agregadas / eliminadas (p. ej. `Modificadas (1): 4.8 Reacciones adversas`).
+
+## 🔗 Puente con CIMA (Alertas-analyzer)
+
+Este repo sigue siendo **independiente**: solo escribe en tablas `ema_epi_*`
+del Supabase compartido. No importa código de Alertas-analyzer ni modifica
+filas de CIMA.
+
+- `scripts/ema_epi_vincular_cima.py` propone vínculos ePI → `nregistro` de CIMA
+  en `ema_epi_cima_vinculo` (estado `propuesto`; nunca pisa uno verificado/rechazado):
+  - `numero_eu` (alta): `EU/1/16/1102/001` → `1161102001` (regla verificada en CIMA).
+    Si solo hay número de producto, prueba presentaciones `001…`.
+  - `identificador` (alta): `identifier.value` numérico del Bundle que existe en CIMA.
+  - `nombre` (baja): última opción, requiere revisión.
+- `sql/002_cima_puente.sql` crea `ema_epi_corridas`, `ema_epi_cima_vinculo`,
+  la vista `v_ema_epi_cambios_cima` (cambio ePI + nregistro + último segmentado CIMA)
+  y amplía `documentos_segmentados.origen` con `'ema_epi'` para que la UI de CIMA
+  pueda segmentar un documento ePI con `segmentador.js` (las secciones ePI se
+  guardan con `codigo` y `html`).
+
+### Orden de aplicación en Supabase (`ggbnfdaxtsngsjssrwrl`)
+
+1. `sql/schema.sql`
+2. `sql/002_cima_puente.sql`
+
+Hasta aplicarlas, el paso *Sincronizar con Supabase* fallará porque las tablas
+`ema_epi_*` no existen.
+
+### Tests
+
+`pytest` corre `tests/test_offline.py` (sin red): caída de la fuente,
+4xx sin reintento, hash estable, conversión EU → nregistro y resumen de cambios.
