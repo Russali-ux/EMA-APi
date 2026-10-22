@@ -53,13 +53,48 @@ ORG_IDS = {
 }
 
 
+DEFAULT_BASE_URL = "https://epi.ema.europa.eu/consuming/api/fhir"
+
+
 class EmaEpiConfigError(RuntimeError):
     """La configuración de la Fase 0 (base URL / key) no está lista."""
 
 
+class EmaEpiFuenteCaida(RuntimeError):
+    """La API de la EMA respondió 5xx o no respondió tras los reintentos.
+
+    Caso real (22/10/2026): todas las rutas devolvían 500 con
+    "The format of value ' ' is invalid." desde
+    RetrievalBusiness.GetConsumerLists -> HttpClientHelper.SendAsync,
+    es decir, un fallo interno de la EMA al llamar a su propio backend.
+    """
+
+    def __init__(self, path: str, http_status: int | None, detalle: str):
+        self.path = path
+        self.http_status = http_status
+        self.detalle = detalle
+        super().__init__(
+            f"API EMA ePI no disponible en {path} "
+            f"(HTTP {http_status or 'sin respuesta'}): {detalle}"
+        )
+
+
+def _resumir_error(resp: requests.Response) -> str:
+    """Extrae el 'message' del JSON de error de la EMA (sin el errorStack)."""
+    try:
+        cuerpo = resp.json()
+        if isinstance(cuerpo, dict) and cuerpo.get("message"):
+            return str(cuerpo["message"])[:300]
+    except ValueError:
+        pass
+    return (resp.text or "")[:300]
+
+
 class EmaEpiClient:
     def __init__(self, base_url: str | None = None, subscription_key: str | None = None):
-        self.base_url = base_url or os.environ.get("EMA_EPI_BASE_URL", "").rstrip("/")
+        self.base_url = (
+            base_url or os.environ.get("EMA_EPI_BASE_URL") or DEFAULT_BASE_URL
+        ).rstrip("/")
         self.subscription_key = subscription_key or os.environ.get(
             "EMA_EPI_SUBSCRIPTION_KEY"
         )
@@ -75,19 +110,37 @@ class EmaEpiClient:
             )
 
     def _get(self, path: str, params: dict | None = None) -> dict:
+        """GET con reintentos.
+
+        - 5xx, timeouts y errores de red se reintentan; si persisten se
+          lanza EmaEpiFuenteCaida (la API de la EMA está caída: no es un
+          error nuestro y el workflow no debe marcarse en rojo).
+        - 4xx no se reintenta: indica un error de la petición (nuestro) y
+          se propaga como HTTPError para que sí falle el job.
+        """
         self._require_base_url()
         url = f"{self.base_url}{path}"
-        last_exc = None
+        last_exc: Exception | None = None
+        last_status: int | None = None
+        last_detalle = ""
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 resp = self.session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
-                resp.raise_for_status()
-                return resp.json()
-            except requests.RequestException as exc:
-                last_exc = exc
-                if attempt < MAX_RETRIES:
-                    time.sleep(RETRY_BACKOFF_SECONDS * attempt)
-        raise last_exc
+            except requests.RequestException as exc:  # timeout / DNS / conexión
+                last_exc, last_status, last_detalle = exc, None, str(exc)
+            else:
+                if resp.status_code < 400:
+                    return resp.json()
+                if resp.status_code < 500:
+                    resp.raise_for_status()
+                last_status = resp.status_code
+                last_detalle = _resumir_error(resp)
+                last_exc = requests.HTTPError(
+                    f"{resp.status_code} para {path}: {last_detalle}", response=resp
+                )
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+        raise EmaEpiFuenteCaida(path, last_status, last_detalle) from last_exc
 
     def get_all_lists(self, count: int = 1000) -> list[dict]:
         """Trae TODAS las PI Lists publicadas en una sola llamada (recurso List).
